@@ -1,0 +1,45 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel Blur
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct TextureRanges
+{
+float minElevation;
+float maxElevation;
+float transitionWidth;
+};
+
+
+RWStructuredBuffer<float> kernel;
+RWStructuredBuffer<float> splatmapData;
+//RWTexture2D<float4> Result;
+float blurRadius;
+int textureRanges;
+int resolution;
+
+[numthreads(8,8,1)]
+void Blur (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    uint stride;
+    uint size;
+    kernel.GetDimensions(size,stride);
+
+    for (int layer = 0; layer < textureRanges; layer++)
+    {
+        float sum = 0.0f;
+        for (int i = -blurRadius; i <= blurRadius; i++)
+        {
+            for (int j = -blurRadius; j <= blurRadius; j++)
+            {
+                int xSample = clamp(id.x + i, 0, resolution - 1);
+                int zSample = clamp(id.y + j, 0, resolution - 1);
+                sum += kernel[((2 * blurRadius + 1) * (i + blurRadius)) + (j + blurRadius)] * splatmapData[(zSample * resolution + xSample) * textureRanges + layer];
+            }
+        }
+
+        splatmapData[(id.y * resolution + id.x) * textureRanges + layer] = sum;
+    }
+}

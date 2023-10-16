@@ -1,0 +1,61 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct TextureRanges
+{
+float minElevation;
+float maxElevation;
+float transitionWidth;
+};
+
+
+RWTexture2D<float4> result;
+RWStructuredBuffer<TextureRanges> textureRanges;
+RWStructuredBuffer<float> HeightMap;
+RWStructuredBuffer<float> splatmapData;
+//RWTexture2D<float4> Result;
+float HeightScale;
+int resolution;
+
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    uint stride;
+    uint size;
+    textureRanges.GetDimensions(size,stride);
+    int index = (resolution * id.y) + id.x;
+    float elevation = HeightMap[index];
+    for (uint i = 0; i < size; i++)
+    {
+        float min = textureRanges[i].minElevation;
+        float max = textureRanges[i].maxElevation;
+
+        float transitionFactor = saturate((elevation - min) / textureRanges[i].transitionWidth) *
+            saturate((max - elevation) / textureRanges[i].transitionWidth);
+        int splatIndex = (id.y * resolution + id.x) * size + i;
+        splatmapData[splatIndex] = transitionFactor;
+    }
+
+    // Normalize the transition values to ensure they add up to 1.
+    float totalTransition = 0;
+    for (i = 0; i < size; i++)
+    {
+        int splatIndex = (id.y * resolution + id.x) * size + i;
+        totalTransition += splatmapData[splatIndex];
+    }
+
+    if (totalTransition > 0)
+    {
+        for (i = 0; i < size; i++)
+        {
+        int splatIndex = (id.y * resolution + id.x) * size + i;
+            splatmapData[splatIndex] /= totalTransition;
+        }
+    }
+    result[id.xy] = float4(elevation/HeightScale,elevation/HeightScale,elevation/HeightScale,1);
+}
