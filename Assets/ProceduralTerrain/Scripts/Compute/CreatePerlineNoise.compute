@@ -1,0 +1,163 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#pragma kernel CSRiver
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+
+struct RiverRules
+{
+float2 start;
+int riverDirection;
+int riverLength;
+};
+
+RWStructuredBuffer<float> heights;
+RWStructuredBuffer<RiverRules> riverRules;
+RWTexture2D<float4> Result;
+float squareGradientSize;
+float frequancy;
+int octaves;
+float persistence;
+float lacunarity;
+float redistribution;
+float centerX;
+float centerY;
+float width;
+float height;
+int riverID;
+
+int numRivers;
+float riverDepth;
+float riverWidth;
+
+float2 randomGradient(int ix, int iy) {
+    
+    const int w = 8 * 4;
+    const int s = w / 2;
+    int a = ix, b = iy;
+    a *= 328415744;
+    b ^= a << s | a >> (w - s);
+    b *= 1911520717;
+    a ^= b << s | b >> (w - s);
+    a *= 2048419325;
+    float random = a * (3.14159265f / ~(~0u >> 1));
+
+    return float2(cos(random), sin(random));
+}
+
+float dotGridGradient(int ix, int iy, float x, float y)
+{
+    // Get gradient from integer coordinates
+    float2 gradient = randomGradient(ix, iy);
+
+    // Compute the distance vector
+    float dx = x - (float)ix;
+    float dy = y - (float)iy;
+
+    // Compute the dot-product
+    return (dx * gradient.x + dy * gradient.y);
+}
+
+// Compute Perlin noise at coordinates x, y
+static float perlin(float x, float y)
+{
+    // Determine grid cell coordinates
+    int x0 = (int)floor(x);
+    int x1 = x0 + 1;
+    int y0 = (int)floor(y);
+    int y1 = y0 + 1;
+
+    // Determine interpolation weights
+    // Could also use higher order polynomial/s-curve here
+    float sx = x - (float)x0;
+    float sy = y - (float)y0;
+
+    // Interpolate between grid point gradients
+    float n0, n1, ix0, ix1, value;
+
+    n0 = dotGridGradient(x0, y0, x, y);
+    n1 = dotGridGradient(x1, y0, x, y);
+    ix0 = lerp(n0, n1, sx);
+
+    n0 = dotGridGradient(x0, y1, x, y);
+    n1 = dotGridGradient(x1, y1, x, y);
+    ix1 = lerp(n0, n1, sx);
+
+    value = lerp(ix0, ix1, sy);
+    return value * 0.5f + 0.5f; // Will return in range -1 to 1. To make it in range 0 to 1, multiply by 0.5 and add 0.5
+}
+
+float DistanceToLine(float2 _point, float2 lineStart, float2 lineEnd)
+{
+    float lineLength = distance(lineStart, lineEnd);
+    if (lineLength == 0)
+    {
+        // Prevent division by zero if the line has no length
+        return distance(_point, lineStart);
+    }
+
+    // Calculate the perpendicular distance from the point to the line
+    float t = dot(_point - lineStart, lineEnd - lineStart) / (lineLength * lineLength);
+
+    if (t < 0)
+    {
+        // Point is closest to the start of the line
+        return distance(_point, lineStart);
+    }
+    else if (t > 1)
+    {
+        // Point is closest to the end of the line
+        return distance(_point, lineEnd);
+    }
+    else
+    {
+        // Point is closest to the line itself
+        float2 projection = lineStart + t * (lineEnd - lineStart);
+        return distance(_point, projection);
+    }
+}
+
+[numthreads(8,1,1)]
+void CSRiver (uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)(riverRules[riverID].start.x + cos(riverRules[riverID].riverDirection * 0.0174533) * id.x * riverWidth);
+    int y = (int)(riverRules[riverID].start.y + sin(riverRules[riverID].riverDirection * 0.0174533) * id.x * riverWidth);
+
+    if (x >= 0 && x < width && y >= 0 && y < height)
+    {
+        heights[(height * y) + x] -= riverDepth;
+    }
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    float amplitude = 1;
+    float frequency = 1;
+    float noiseHeight = 0; 
+    // Calculate the distance from the center independently for both X and Y axes
+    float distanceFromCenterX = abs((id.x - centerX)) / centerX;
+    float distanceFromCenterY = abs((id.y - centerY)) / centerY;
+    for (int i = 0; i < octaves; i++)
+    {
+        float xCoord = (float)id.x / width * frequancy * frequency;
+        float yCoord = (float)id.y / height * frequancy * frequency;
+        float perlinValue = perlin(xCoord, yCoord) * 2 - 1;
+        noiseHeight += perlinValue * amplitude;
+
+        amplitude *= persistence;
+        frequency *= lacunarity;
+    }
+
+    noiseHeight = pow(abs(noiseHeight), redistribution);
+
+    // Apply the square gradient effect based on distance from the center for both axes
+    float gradientX = 1 - saturate(distanceFromCenterX / squareGradientSize);
+    float gradientY = 1 - saturate(distanceFromCenterY / squareGradientSize);
+    int index = (height * id.y) + id.x;
+    float finalHeight = noiseHeight * gradientX * gradientY;
+    heights[index] = finalHeight;
+    Result[id.xy] = finalHeight;
+}

@@ -5,6 +5,7 @@ using Unity.VisualScripting;
 using Unity.VisualScripting.Antlr3.Runtime.Misc;
 using UnityEditor.ShaderGraph;
 using UnityEngine;
+using Random = UnityEngine.Random;
 [Serializable]
 public class Elevation 
 {
@@ -18,8 +19,18 @@ public class Elevation
     public float maxElevation = 1.0f;
     public float transitionWidth = 0.1f;
 }
+
+[Serializable]
+public struct RiverRules
+{
+    public Vector2 start;
+    public int riverDirection;
+    public int riverLength;
+}
 public class TerrainGenerator : MonoBehaviour
 {
+    public ComputeShader PerlinNoise;
+    //public ComputeShader RiverPass;
     public int width = 256;
     public int height = 256;
     public float scale = 20; 
@@ -31,68 +42,27 @@ public class TerrainGenerator : MonoBehaviour
     public float lacunarity = 2.0f;
     public float redistribution = 1.1f;
 
+    //public int numRivers = 5;  // Number of rivers
+    public float riverDepth = 0.2f;  // Maximum river depth
+    public float riverWidth = 5.0f; // Adjust this to control river width
+    public int seed = 42; // Seed for consistent results
+    public bool RandmizedRivers;
+
+    public RiverRules[] riverRules;
+
+    public RenderTexture texture;
+
     public Material terrainMaterial;
 
     private Terrain terrain;
-    public float[,,] splats;
-
-    public Elevation[] Elevations = new Elevation[]
-    {
-        new Elevation()
-        {
-            name = "Snow",
-            color=new Color(216 / 255f, 222 / 255f, 233 / 255f),
-            height= 0.85f
-        },
-        new Elevation()
-        {
-            name = "Snow0",
-            color =new Color(121 / 255f, 133 / 255f, 159 / 255f),
-            height= 0.45f
-        },
-
-        new Elevation()
-        {
-            name = "Snow1",
-            color = new Color(76 / 255f, 86 / 255f, 106 / 255f),
-            height= 0.38f
-        },
-        new Elevation()
-        {
-            name = "Grass0",
-            color = new Color(163 / 255f, 190 / 255f, 140 / 255f),
-            height= 0.20f
-        },
-        new Elevation()
-        {
-            name = "Grass",
-            color=new Color(143 / 255f, 176 / 255f, 115 / 255f),
-            height= 0.15f
-        },
-        new Elevation()
-        {
-            name = "Sand",
-            color=new Color(235 / 255f, 203 / 255f, 139 / 255f),
-            height= 0.115f
-        },
-        new Elevation()
-        {
-            name = "Water0",
-            color=new Color(115 / 255f, 146 / 255f, 183 / 255f),
-            height= 0.1f
-        },
-        new Elevation()
-        {
-            name = "Water",
-            color=new Color(94 / 255f, 129 / 255f, 172 / 255f),
-            height = 0
-        },
-    };
+    private ComputeBuffer heightBuffer;
+    private float[] _heights;
+    private ComputeBuffer riverRulesBuffer;
+    private System.Random random;
 
     void Start()
     {
         terrain = GetComponent<Terrain>();
-        splats = new float[terrain.terrainData.alphamapWidth, terrain.terrainData.alphamapHeight, Elevations.Length];
         GenerateTerrain();
     }
 
@@ -101,49 +71,103 @@ public class TerrainGenerator : MonoBehaviour
     {
         if (!terrain)
             terrain = GetComponent<Terrain>();
-        if (splats == null)
-            splats = new float[terrain.terrainData.alphamapWidth, terrain.terrainData.alphamapHeight, Elevations.Length];
         UnityEditor.EditorApplication.delayCall = GenerateTerrain;
     }
 #endif
 
+    private void OnDisable()
+    {
+        heightBuffer.Release();
+        heightBuffer = null;
+        riverRulesBuffer.Release();
+        riverRulesBuffer = null;
+    }
+
     void GenerateTerrain()
     {
-        repeated = new int[Elevations.Length];
-        terrain.terrainData.terrainLayers = Elevations.Select(x =>
-        new TerrainLayer()
-        {
-            name = x.name,
-            diffuseTexture = (x.useTexture)? x.texture : CreateTextureFromColor(x.color, width, height),
-            smoothness = 0,
-            metallic = 0,
-        }
-        ).ToArray();
+        random = new System.Random(seed);
         terrain.terrainData = GenerateTerrain(terrain.terrainData);
         //ApplyElevationColor();
     }
 
     TerrainData GenerateTerrain(TerrainData terrainData)
     {
-        terrainData.heightmapResolution = width + 1;
+        if(heightBuffer == null || heightBuffer.count != height * width)
+            heightBuffer = new ComputeBuffer(height * width,sizeof(float));
+        if(!texture)
+        {
+            texture = new RenderTexture(width, height, 24);
+            texture.enableRandomWrite = true;
+            texture.Create();
+        }
         terrainData.size = new Vector3(width, scale, height);
+        UpdateHeightBuffer();
         terrainData.SetHeights(0, 0, GenerateHeights());
         print(terrain.terrainData.alphamapResolution);
-        terrain.terrainData.SetAlphamaps(0, 0, splats);
         return terrainData;
+    }
+
+    void CreateRivers()
+    {
+        if (RandmizedRivers)
+        {
+            for (int i = 0; i < riverRules.Length; i++)
+            {
+                int startX = random.Next(width);
+                int startY = random.Next(height);
+                riverRules[i].start = new Vector2(startX, startY);
+                riverRules[i].riverDirection = random.Next(360);
+                riverRules[i].riverLength = random.Next(50, 100);
+            }
+
+        }
+        if (riverRulesBuffer == null || riverRulesBuffer.count != riverRules.Length)
+                riverRulesBuffer = new ComputeBuffer(riverRules.Length, sizeof(float) * 4);
+            riverRulesBuffer.SetData(riverRules);
+            PerlinNoise.SetBuffer(PerlinNoise.FindKernel("CSRiver"), "riverRules", riverRulesBuffer);
+            PerlinNoise.SetBuffer(PerlinNoise.FindKernel("CSRiver"), "heights", heightBuffer);
+            PerlinNoise.SetFloat("numRivers", riverRules.Length);
+            PerlinNoise.SetFloat("riverDepth", riverDepth);
+            PerlinNoise.SetFloat("riverWidth", riverWidth);
+
+            for (int i = 0; i < riverRules.Length; i++)
+            {
+                PerlinNoise.SetFloat("riverID", i);
+                PerlinNoise.Dispatch(PerlinNoise.FindKernel("CSRiver"), riverRules[i].riverLength / 8, 1, 1);
+            }
+    }
+
+    void UpdateHeightBuffer()
+    {
+        float centerX = width / 2f; // Calculate the center of the terrain on the X-axis
+        float centerY = height / 2f; // Calculate the center of the terrain on the Y-axis
+        PerlinNoise.SetBuffer(PerlinNoise.FindKernel("CSMain"), "heights", heightBuffer);
+        PerlinNoise.SetTexture(PerlinNoise.FindKernel("CSMain"), "Result", texture);
+        PerlinNoise.SetFloat("squareGradientSize", squareGradientSize);
+        PerlinNoise.SetFloat("frequancy", frequancy);
+        PerlinNoise.SetFloat("octaves", octaves);
+        PerlinNoise.SetFloat("persistence", persistence);
+        PerlinNoise.SetFloat("lacunarity", lacunarity);
+        PerlinNoise.SetFloat("redistribution", redistribution);
+        PerlinNoise.SetFloat("centerX", centerX);
+        PerlinNoise.SetFloat("centerY", centerY);
+        PerlinNoise.SetFloat("width", width);
+        PerlinNoise.SetFloat("height", height);
+        PerlinNoise.Dispatch(PerlinNoise.FindKernel("CSMain"), width / 8, height / 8, 1);
+        _heights = new float[width * height];
+        CreateRivers();
+        heightBuffer.GetData(_heights);
     }
 
     float[,] GenerateHeights()
     {
         float[,] heights = new float[width, height];
-        float centerX = width / 2f; // Calculate the center of the terrain on the X-axis
-        float centerY = height / 2f; // Calculate the center of the terrain on the Y-axis
-
+        int index = 0;
         for (int x = 0; x < width; x++)
         {
             for (int y = 0; y < height; y++)
             {
-                float amplitude = 1;
+                /*float amplitude = 1;
                 float frequency = 1;
                 float noiseHeight = 0; 
                 // Calculate the distance from the center independently for both X and Y axes
@@ -165,102 +189,12 @@ public class TerrainGenerator : MonoBehaviour
                 // Apply the square gradient effect based on distance from the center for both axes
                 float gradientX = 1f - Mathf.Clamp01(distanceFromCenterX / squareGradientSize);
                 float gradientY = 1f - Mathf.Clamp01(distanceFromCenterY / squareGradientSize);
-                heights[x, y] = noiseHeight * gradientX * gradientY;
-                ApplyElevationColor(x, y, heights[x, y]);
+                heights[x, y] = noiseHeight * gradientX * gradientY;*/
+                heights[x, y] = _heights[index];
+                index++;
             }
         }
 
         return heights;
-    }
-    int lastpixely;
-    int[] repeated;
-    int totalpaints;
-    void ApplyElevationColor(int x, int y, float elevation)
-    {
-        if (Elevations.Length < 1)
-            return;
-        TerrainData terrainData = terrain.terrainData;
-        var _height = 1f;
-        var layer = 0;
-        //if (terrainMaterial != null)
-        for (int i = 0; i < Elevations.Length; i++)
-        {
-            if (elevation >= Elevations[i].height && Elevations[i].height < _height)
-            {
-                _height = Elevations[i].height;
-                layer = i;
-            }
-        }
-        float tx = (float)x / width * terrainData.alphamapWidth;
-        float ty = (float)y / height * terrainData.alphamapHeight;
-        if (((int)ty) != lastpixely)
-        {
-            for (int i = 0; i < repeated.Length; i++)
-                splats[(int)tx, (int)ty, i] = repeated[i] / totalpaints;
-            lastpixely = (int)ty;
-            repeated = new int[Elevations.Length];
-            totalpaints = 0;
-        }
-        repeated[layer]++;
-        totalpaints++;
-        //terrainMaterial.SetTexture("_MainTex", CreateTextureFromColors(colors, width, height));
-    }
-
-    Color CalculateColor(float elevation)
-    {
-        if (elevation >= 0.85)
-        {
-            return new Color(216 / 255f, 222 / 255f, 233 / 255f);
-        }
-        else if (elevation >= 0.45)
-        {
-            return new Color(121 / 255f, 133 / 255f, 159 / 255f);
-        }
-        else if (elevation >= 0.38)
-        {
-            return new Color(76 / 255f, 86 / 255f, 106 / 255f);
-        }
-        else if (elevation >= 0.20)
-        {
-            return new Color(163 / 255f, 190 / 255f, 140 / 255f);
-        }
-        else if (elevation >= 0.15)
-        {
-            return new Color(143 / 255f, 176 / 255f, 115 / 255f);
-        }
-        else if (elevation >= 0.115)
-        {
-            return new Color(235 / 255f, 203 / 255f, 139 / 255f);
-        }
-        else if (elevation >= 0.1)
-        {
-            return new Color(115 / 255f, 146 / 255f, 183 / 255f);
-        }
-        else
-        {
-            return new Color(94 / 255f, 129 / 255f, 172 / 255f);
-        }
-    }
-
-    Texture2D CreateTextureFromColors(Color[] colors, int width, int height)
-    {
-        Texture2D texture = new Texture2D(width, height,TextureFormat.RGB24,true);
-        texture.filterMode = FilterMode.Bilinear;
-        texture.wrapMode = TextureWrapMode.Repeat;
-        texture.SetPixels(colors);
-        texture.Apply();
-        return texture;
-    }
-    Texture2D CreateTextureFromColor(Color color, int width, int height)
-    {
-        Color[] colors = new Color[width * height];
-        for (int i = 0; i < colors.Length; i++)
-            colors[i] = color;
-        Texture2D texture = new Texture2D(width, height, TextureFormat.RGB24, true);
-        texture.filterMode = FilterMode.Bilinear;
-        texture.wrapMode = TextureWrapMode.Repeat;
-        texture.SetPixels(colors);
-        texture.Apply();
-        return texture;
     }
 }
