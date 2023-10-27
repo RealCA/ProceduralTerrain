@@ -2,7 +2,7 @@
  Free Procedural Terrain Project For Unity
 
 # TO DO
-  - Start using compute shaders for speed
+  - Optimize compute shaders.
   - Add Rivers.
   - Add Hills.
   - Add Lake.
